@@ -30,3 +30,7 @@ Comprehensive gene annotation	CHR（基因长度注释）
         * **ii. 并发执行:** 所有“工人” `goroutine` 从管道中抓取任务，并行计算皮尔逊相关系数 `r`。
         * **iii. 结果收集:** “工人们”将计算结果 `[i, j, r]` 放入 `results` 管道，由一个 `goroutine` 异步收集并组装成最终矩阵。
     * **d. 产出:** `main.go` 调用 `writeCorrelationMatrix` 函数，将这个 `16746 x 16746` 的相关性矩阵保存为 `correlation_matrix.csv`。
+
+thyroid matrix:
+https://drive.google.com/file/d/15FEyBlubkOzGZNARPno2PqadztDV3ztq/view?usp=drive_link
+correlation matrix (Based on Pearsons):
