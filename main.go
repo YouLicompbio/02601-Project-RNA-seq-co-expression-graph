@@ -6,8 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"flag"
 )
-
+/*example input:
 const (
 	// input1: GCT data path
 	gctDataFile = "gene_reads_v10_thyroid.gct.gz"
@@ -28,97 +29,132 @@ const (
 	//soft threshold: beta
 	softPowerBeta = 6.0
 )
+*/
+
+type Config struct {
+	GCTPath       string
+	GTFPath       string
+	OutputPrefix  string
+	LowExpThresh  float64
+	LowVarPercent float64
+	SoftPowerBeta float64
+}
+
+func init() {
+	// 定义命令行参数，RShiny 将通过这些参数控制 Go 程序
+	flag.StringVar(&config.GCTPath, "gct", "gene_reads.gct.gz", "Path to the input GCT file (gene counts)")
+	flag.StringVar(&config.GTFPath, "gtf", "annotation.gtf.gz", "Path to the GTF annotation file")
+	flag.StringVar(&config.OutputPrefix, "out", "output", "Prefix for the output files (e.g., 'results/run1')")
+	
+	flag.Float64Var(&config.LowExpThresh, "min_exp", 0.9, "Threshold for low expression filtering (log2CPM)")
+	flag.Float64Var(&config.LowVarPercent, "min_var", 0.25, "Percentile for low variance filtering (0-1)")
+	flag.Float64Var(&config.SoftPowerBeta, "beta", 6.0, "Soft thresholding power (beta) for network construction")
+	
+	// 自定义 Usage 信息，提升文档质量
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "This program constructs a gene co-expression network from RNA-seq data.\n")
+		fmt.Fprintf(os.Stderr, "\nParameters:\n")
+		flag.PrintDefaults()
+	}
+}
+
+var config Config
+
 
 func main() {
-	//PHASE2: Preprocessing the data (parsing & filtering)
-	log.Println("Phase 1: Preprocessing the data (parsing & filtering)")
-	// step 1: parsing GTF annotations (we need gene length for TPM)
-	log.Println("Parsing GTF annotation...")
-	// We need to perform **streaming parsing** of GTF because it becomes extremely large after decompression.
-	// With parseGTFtoLengths, we get: 
-	// map[gene_id_with_version] -> length_in_kilobases
-	geneLengthsKB, err := parseGTFToLengths(gtfAnnotationFile)
-	if err != nil {
-		log.Fatalf("Failed: %v", err)
-	}
-	log.Printf("...succeed in parsing %d genes length\n", len(geneLengthsKB))
+	flag.Parse() // 解析参数
 
+	// ---------------------------------------------------------
+	// PHASE 1: Preprocessing (Gene x Sample)
+	// ---------------------------------------------------------
+	log.Println("Phase 1: Preprocessing the data...")
 	
-	// step 2: preprocessing GCT raw main counts
-	
-	log.Println("Preprocessing GCT raw counts")
-	
-	// With processGCTFile, we get a cleaned matrix.
+	log.Println("Parsing GTF annotation...")
+	geneLengthsKB, err := parseGTFToLengths(config.GTFPath)
+	if err != nil {
+		log.Fatalf("Failed to parse GTF: %v", err)
+	}
+
+	log.Println("Preprocessing GCT raw counts...")
 	finalMatrix, finalGeneList, finalSampleList, err := processGCTFile(
-		gctDataFile,
+		config.GCTPath,
 		geneLengthsKB,
-		lowExpressionThreshold,
-		lowVariancePercentile,
+		config.LowExpThresh,
+		config.LowVarPercent,
 	)
 	if err != nil {
-		log.Fatalf("Failed: %v", err)
+		log.Fatalf("Failed to process GCT: %v", err)
 	}
 
-	
-	log.Println("Phase 2: Correlation matrix & Adjacency matrix")
-	// PHASE2: Pearsons matrix; Correlation matrix
-	// Step 3: Write the matrix for following analyzing.
-	log.Println("Generating the matrix:", outputMatrixFile)
-	err = writeOutputCSV(outputMatrixFile, finalMatrix, finalGeneList, finalSampleList)
+	// [Phase 1Output] 这里还是用 writeOutputCSV，因为它是 Gene x Sample
+	cleanMatrixFile := config.OutputPrefix + "_clean_matrix.csv"
+	log.Println("Saving clean matrix to:", cleanMatrixFile)
+	err = writeOutputCSV(cleanMatrixFile, finalMatrix, finalGeneList, finalSampleList)
 	if err != nil {
-		log.Fatalf("Failed in writing the matrix: %v", err)
+		log.Fatalf("Failed writing clean matrix: %v", err)
 	}
 
-	
-	log.Printf("  (P2) uses a %d gene x %d sample matrix", len(finalGeneList), len(finalSampleList))
+	// ---------------------------------------------------------
+	// PHASE 2: Correlation (Gene x Gene)
+	// ---------------------------------------------------------
+	log.Println("Phase 2: Calculating Correlation Matrix...")
 	correlationMatrix, err := RunPhase2(finalMatrix, finalGeneList)
 	if err != nil {
-		log.Fatalf("failed to run phase 2: %v", err)
+		log.Fatalf("Failed Phase 2: %v", err)
 	}
 
-	err = writeCorrelationMatrix("correlation_matrix.csv", correlationMatrix, finalGeneList)
+	// [使用你的函数] 保存 Correlation
+	corrFile := config.OutputPrefix + "_correlation.csv"
+	log.Println("Saving Correlation Matrix...")
+	err = writeCorrelationMatrix(corrFile, correlationMatrix, finalGeneList)
 	if err != nil {
-		// Log a warning if saving fails, but don't stop the program
-		log.Printf("warning: failed to save correlation matrix: %v", err)
+		log.Printf("warning: failed to save correlation: %v", err)
 	}
-	// PHASE 3: 构建邻接矩阵 (Adjacency Matrix)
-	log.Println("Phase 3: Calculating Adjacency Matrix...")
-    log.Printf(" -> Applying Soft Thresholding with Beta = %.1f", softPowerBeta)
 
-	adjacencyMatrix := CalculateAdjacencyMatrix(correlationMatrix, softPowerBeta)
-	log.Printf(" -> Adjacency Matrix created. Size: %d x %d", len(adjacencyMatrix), len(adjacencyMatrix))
-	//save the adjacency matrix
-	log.Println("Saving Adjacency Matrix to CSV...")
-    err = writeCorrelationMatrix("adjacency_matrix.csv", adjacencyMatrix, finalGeneList) 
-    if err != nil {
-        log.Printf("warning: failed to save adjacency matrix: %v", err)
-    }
-	// PHASE 4: Topological Overlap Matrix (TOM)
-	log.Println("Phase 4: Calculating Topological Overlap Matrix (TOM)...")
+	// ---------------------------------------------------------
+	// PHASE 3: Adjacency (Gene x Gene)
+	// ---------------------------------------------------------
+	log.Printf("Phase 3: Calculating Adjacency (Beta=%.1f)...", config.SoftPowerBeta)
+	adjacencyMatrix := CalculateAdjacencyMatrix(correlationMatrix, config.SoftPowerBeta)
+	
+	// [使用你的函数] 保存 Adjacency
+	adjFile := config.OutputPrefix + "_adjacency.csv"
+	log.Println("Saving Adjacency Matrix...")
+	err = writeCorrelationMatrix(adjFile, adjacencyMatrix, finalGeneList)
+	if err != nil {
+		log.Printf("warning: failed to save adjacency: %v", err)
+	}
+
+	// ---------------------------------------------------------
+	// PHASE 4: TOM (Gene x Gene)
+	// ---------------------------------------------------------
+	log.Println("Phase 4: Calculating TOM...")
 	tomMatrix := CalculateTOM(adjacencyMatrix)
-	log.Printf(" -> TOM created. Size: %d x %d", len(tomMatrix), len(tomMatrix))
-	log.Println("Saving TOM Matrix to CSV (This might be large)...")
-    err = writeCorrelationMatrix("tom_matrix.csv", tomMatrix, finalGeneList)
-    if err != nil {
-        log.Printf("warning: failed to save TOM matrix: %v", err)
-    }
+	
+	// [使用你的函数] 保存 TOM
+	tomFile := config.OutputPrefix + "_tom_matrix.csv"
+	log.Println("Saving TOM Matrix...")
+	err = writeCorrelationMatrix(tomFile, tomMatrix, finalGeneList)
+	if err != nil {
+		log.Printf("warning: failed to save TOM: %v", err)
+	}
 
-	// PHASE 5: Prepare for Clustering (Dissimilarity)
-    // ---------------------------------------------------------
-    log.Println("Phase 5: Calculating Dissimilarity Matrix (1 - TOM)...")
-    
-    // 转换
-    distMatrix := CalculateDissimilarity(tomMatrix)
-    
-    // 保存
-    // 这个文件就是 Python 的输入
-    log.Println("Saving Dissimilarity Matrix for Python clustering...")
-    err = writeOutputCSV("dissimilarity_matrix.csv", distMatrix, finalGeneList, finalGeneList) // 注意这里行列名都是 geneList
-    if err != nil {
-        log.Fatalf("Failed to save dissimilarity matrix: %v", err)
-    }
-    
-    log.Println("DONE! Go pipeline finished. Now run the Python script for clustering.")
+	// ---------------------------------------------------------
+	// PHASE 5: Dissimilarity (Gene x Gene) -> For RShiny
+	// ---------------------------------------------------------
+	log.Println("Phase 5: Calculating Dissimilarity (1-TOM)...")
+	distMatrix := CalculateDissimilarity(tomMatrix)
+	
+	// [使用你的函数] 保存 Dissimilarity
+	finalFile := config.OutputPrefix + "_dissimilarity.csv"
+	log.Println("Saving Dissimilarity Matrix for clustering...")
+	err = writeCorrelationMatrix(finalFile, distMatrix, finalGeneList)
+	if err != nil {
+		log.Fatalf("Failed to save final dissimilarity matrix: %v", err)
+	}
+
+	log.Println("DONE! Pipeline finished.")
 }
 
 
